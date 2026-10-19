@@ -1,0 +1,65 @@
+name: GS/CP bot
+
+on:
+  schedule:
+    # Every 15 minutes (GitHub's minimum is 5). Scheduled runs can start a few minutes late.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (read and fetch everything, but reply/rename/post/save nothing)'
+        type: boolean
+        default: false
+
+# The bot saves its encrypted memory to a "state" branch in this repo.
+permissions:
+  contents: write
+
+# Never run two at once (they would both answer the same messages).
+concurrency:
+  group: gscs-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load saved state
+        run: |
+          if git ls-remote --exit-code --heads origin state >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin state
+            mkdir -p state
+            git show FETCH_HEAD:state.enc > state/state.enc
+            echo "Loaded saved state"
+          else
+            echo "No saved state yet (first run)"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run bot
+        run: node src/index.js
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+
+      - name: Save state
+        if: success() && inputs.dry_run != true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          [ -f state/state.enc ] || { echo "Nothing to save"; exit 0; }
+          cd state
+          git init -q
+          git checkout -q -b state
+          git add state.enc
+          git -c user.name="gscs-bot" -c user.email="gscs-bot@users.noreply.github.com" commit -q -m "Update bot state"
+          # Force-push a single commit so the branch never grows.
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" state
+          echo "State saved"
